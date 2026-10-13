@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Letter P -->
+  <path d="M168 112h120c55.228 0 100 44.772 100 100v0c0 55.228-44.772 100-100 100H228v88" 
+        stroke="white" stroke-width="56" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Download arrow -->
+  <path d="M320 320 l0 72 l40 -40" stroke="url(#arrow)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.85"/>
+  <path d="M320 320 l0 72 l-40 -40" stroke="url(#arrow)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.85"/>
+</svg>
