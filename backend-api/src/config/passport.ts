@@ -20,7 +20,7 @@ export function setupPassport(): void {
           // 2. Fallback to Authorization header (API clients)
           ExtractJwt.fromAuthHeaderAsBearerToken(),
         ]),
-        secretOrKey: process.env.JWT_SECRET!,
+        secretOrKey: process.env.JWT_SECRET || 'pinvaultpro_default_jwt_secret_key_2026',
         issuer: 'pinvaultpro',
         audience: 'pinvaultpro-client',
       },

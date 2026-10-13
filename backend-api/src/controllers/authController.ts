@@ -12,8 +12,8 @@ import { sendEmail } from '../utils/email';
 import { logger } from '../utils/logger';
 import type { User, JwtPayload } from '../types';
 
-const JWT_SECRET = process.env.JWT_SECRET!;
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET!;
+const JWT_SECRET = process.env.JWT_SECRET || 'pinvaultpro_default_jwt_secret_key_2026';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'pinvaultpro_default_refresh_secret_key_2026';
 const ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const REFRESH_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;

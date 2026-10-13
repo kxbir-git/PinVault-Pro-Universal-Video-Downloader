@@ -12,12 +12,28 @@ const PORT = parseInt(process.env.PORT || '4000', 10);
 async function bootstrap() {
   try {
     // Connect database
-    await connectDatabase();
-    logger.info('✅ PostgreSQL connected');
+    try {
+      if (process.env.DATABASE_URL) {
+        await connectDatabase();
+        logger.info('✅ PostgreSQL connected');
+      } else {
+        logger.warn('⚠️ DATABASE_URL not set – running without PostgreSQL');
+      }
+    } catch (dbErr) {
+      logger.warn(dbErr, '⚠️ PostgreSQL connection failed on startup');
+    }
 
     // Connect Redis
-    await connectRedis();
-    logger.info('✅ Redis connected');
+    try {
+      if (process.env.REDIS_URL) {
+        await connectRedis();
+        logger.info('✅ Redis connected');
+      } else {
+        logger.warn('⚠️ REDIS_URL not set – running without Redis');
+      }
+    } catch (redisErr) {
+      logger.warn(redisErr, '⚠️ Redis connection failed on startup');
+    }
 
     // Create HTTP server
     const httpServer = createServer(app);
@@ -26,9 +42,15 @@ async function bootstrap() {
     initWebSocket(httpServer);
     logger.info('✅ WebSocket server initialized');
 
-    // Start BullMQ workers
-    await startWorkers();
-    logger.info('✅ BullMQ workers started');
+    // Start BullMQ workers if Redis is present
+    if (process.env.REDIS_URL) {
+      try {
+        await startWorkers();
+        logger.info('✅ BullMQ workers started');
+      } catch (workerErr) {
+        logger.warn(workerErr, '⚠️ BullMQ workers could not start');
+      }
+    }
 
     // Start listening
     httpServer.listen(PORT, () => {
