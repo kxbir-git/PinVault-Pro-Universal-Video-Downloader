@@ -30,6 +30,8 @@ export default function Home() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [downloadingFormatId, setDownloadingFormatId] = useState<string | null>(null);
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
   const PYTHON_URL = process.env.NEXT_PUBLIC_PYTHON_URL || 'http://localhost:8001';
@@ -44,22 +46,25 @@ export default function Home() {
     setVideoMeta(null);
 
     try {
-      const res = await fetch(`${PYTHON_URL}/api/metadata`, {
+      const res = await fetch('/api/metadata', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: url.trim() }),
       });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      const data = await res.json().catch(() => ({}));
 
-      const data: VideoMeta = await res.json();
-      setVideoMeta(data);
-      setStatus(null);
-    } catch (error: any) {
-      setStatus(error.message || 'Failed to fetch video info. Please check the URL.');
+      if (res.ok && (data?.title || data?.thumbnail)) {
+        setVideoMeta(data);
+        setStatus(null);
+      } else {
+        const errorMsg = data?.detail || data?.error || `Error fetching video info (Status ${res.status})`;
+        setStatus(errorMsg);
+        setStatusType('error');
+      }
+    } catch (err: any) {
+      console.error('Metadata fetch error:', err);
+      setStatus(err?.message || 'Network error while connecting to server.');
       setStatusType('error');
     } finally {
       setIsLoading(false);
@@ -67,37 +72,65 @@ export default function Home() {
   };
 
   const handleDownload = async (formatId?: string) => {
+    const selectedFormat = formatId || 'best';
     setIsDownloading(true);
-    setStatus('Downloading video... This may take a moment.');
+    setDownloadingFormatId(selectedFormat);
+    setDownloadProgress(null);
+    setStatus('Processing & packaging video on server... Please wait.');
     setStatusType('info');
 
     try {
-      const res = await fetch(`${PYTHON_URL}/api/download`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim(), quality: formatId || 'best' }),
-      });
-
-      if (!res.ok) {
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const err = await res.json();
-          throw new Error(err.detail || 'Download failed');
-        }
-        throw new Error(`Download failed (HTTP ${res.status})`);
+      const downloadUrl = `/api/download?url=${encodeURIComponent(url.trim())}&quality=${encodeURIComponent(selectedFormat)}`;
+      
+      const response = await fetch(downloadUrl);
+      
+      if (!response.ok) {
+        const errorJson = await response.json().catch(() => ({}));
+        throw new Error(errorJson.detail || `Download failed with HTTP ${response.status}`);
       }
 
-      // Get the filename from Content-Disposition header
-      const disposition = res.headers.get('content-disposition');
+      const contentLengthHeader = response.headers.get('content-length');
+      const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : 0;
+      
+      const disposition = response.headers.get('content-disposition') || '';
       let filename = 'video.mp4';
-      if (disposition) {
-        const match = disposition.match(/filename="?([^";\n]+)"?/);
-        if (match) filename = match[1];
+      const filenameMatch = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+      if (filenameMatch && filenameMatch[1]) {
+        filename = filenameMatch[1].replace(/['"]/g, '');
       }
 
-      // Stream the response as a blob and trigger browser download
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
+      if (!response.body) {
+        throw new Error('No readable data stream received.');
+      }
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let receivedBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          receivedBytes += value.length;
+
+          if (totalBytes > 0) {
+            const percent = Math.min(100, Math.round((receivedBytes / totalBytes) * 100));
+            setDownloadProgress(percent);
+            const receivedMb = (receivedBytes / (1024 * 1024)).toFixed(1);
+            const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+            setStatus(`Downloading: ${percent}% (${receivedMb} MB / ${totalMb} MB)`);
+          } else {
+            const receivedMb = (receivedBytes / (1024 * 1024)).toFixed(1);
+            setStatus(`Downloading: ${receivedMb} MB received...`);
+          }
+        }
+      }
+
+      const blob = new Blob(chunks as BlobPart[], {
+        type: response.headers.get('content-type') || 'video/mp4',
+      });
+      const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
       a.download = filename;
@@ -105,16 +138,23 @@ export default function Home() {
       a.click();
       document.body.removeChild(a);
 
-      // Clean up the blob URL after a short delay
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      // Do NOT revoke immediately; let browser finish saving
+      setTimeout(() => {
+        try {
+          window.URL.revokeObjectURL(blobUrl);
+        } catch {}
+      }, 60000);
 
-      setStatus('✓ Download complete! Check your Downloads folder.');
+      setStatus(`✓ Successfully downloaded "${filename}"! Saved to your downloads.`);
       setStatusType('success');
-    } catch (error: any) {
-      setStatus(error.message || 'Download failed. Please try again.');
+    } catch (err: any) {
+      console.error('Download error:', err);
+      setStatus(err?.message || 'Download failed. Please try another quality.');
       setStatusType('error');
     } finally {
       setIsDownloading(false);
+      setDownloadingFormatId(null);
+      setDownloadProgress(null);
     }
   };
 
@@ -291,23 +331,53 @@ export default function Home() {
                     </h3>
                   </div>
 
+                  {/* Live Progress Bar */}
+                  {isDownloading && (
+                    <div className="my-2.5">
+                      <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200">
+                        <div
+                          className="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-out"
+                          style={{ width: `${downloadProgress !== null ? downloadProgress : 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* Quality options */}
                   {videoMeta.formats.length > 0 ? (
                     <div className="flex flex-wrap gap-2 pt-1">
-                      {videoMeta.formats.map((f) => (
-                        <button
-                          key={f.format_id}
-                          onClick={() => handleDownload(f.format_id)}
-                          disabled={isDownloading}
-                          className="px-3.5 py-2 bg-slate-900 hover:bg-slate-700 active:scale-95 disabled:opacity-50 text-white text-xs font-semibold rounded-xl sm:rounded-full transition-all flex items-center gap-1.5 shadow-sm"
-                        >
-                          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                          </svg>
-                          <span>{f.resolution}</span>
-                          {f.filesize ? <span className="opacity-70 text-[11px]">({formatSize(f.filesize)})</span> : null}
-                        </button>
-                      ))}
+                      {videoMeta.formats.map((f) => {
+                        const isThisBtnDownloading = isDownloading && downloadingFormatId === f.format_id;
+                        return (
+                          <button
+                            key={f.format_id}
+                            onClick={() => handleDownload(f.format_id)}
+                            disabled={isDownloading}
+                            className={`px-3.5 py-2 active:scale-95 disabled:opacity-60 text-white text-xs font-semibold rounded-xl sm:rounded-full transition-all flex items-center gap-1.5 shadow-sm ${
+                              isThisBtnDownloading ? 'bg-blue-600 animate-pulse' : 'bg-slate-900 hover:bg-slate-700'
+                            }`}
+                          >
+                            {isThisBtnDownloading ? (
+                              <svg className="w-3.5 h-3.5 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                              </svg>
+                            ) : (
+                              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                              </svg>
+                            )}
+                            <span>
+                              {isThisBtnDownloading && downloadProgress !== null
+                                ? `${downloadProgress}%`
+                                : f.resolution}
+                            </span>
+                            {f.filesize && !isThisBtnDownloading ? (
+                              <span className="opacity-70 text-[11px]">({formatSize(f.filesize)})</span>
+                            ) : null}
+                          </button>
+                        );
+                      })}
                     </div>
                   ) : (
                     <button
@@ -315,10 +385,22 @@ export default function Home() {
                       disabled={isDownloading}
                       className="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 text-white text-xs sm:text-sm font-semibold rounded-xl sm:rounded-full transition-all flex items-center justify-center gap-2 shadow-md"
                     >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      {isDownloading ? 'Downloading...' : 'Download Best Quality'}
+                      {isDownloading ? (
+                        <>
+                          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                          </svg>
+                          <span>{downloadProgress !== null ? `Downloading ${downloadProgress}%...` : 'Processing...'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                          <span>Download Best Quality</span>
+                        </>
+                      )}
                     </button>
                   )}
                 </div>

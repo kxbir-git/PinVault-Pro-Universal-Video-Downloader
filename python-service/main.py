@@ -14,11 +14,32 @@ import requests
 from pathlib import Path
 from urllib.parse import urlparse
 
+import sys
+import shutil
+
 # Check bundled ffmpeg
+FFMPEG_PATH = None
 try:
-    import imageio_ffmpeg
-    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-except Exception:
+    scripts_ffmpeg = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin") / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if scripts_ffmpeg.exists():
+        FFMPEG_PATH = str(scripts_ffmpeg)
+    else:
+        import imageio_ffmpeg
+        raw_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        if raw_ffmpeg and os.path.exists(raw_ffmpeg):
+            try:
+                shutil.copyfile(raw_ffmpeg, str(scripts_ffmpeg))
+                FFMPEG_PATH = str(scripts_ffmpeg)
+            except Exception:
+                FFMPEG_PATH = raw_ffmpeg
+
+    if FFMPEG_PATH:
+        ffmpeg_dir = str(Path(FFMPEG_PATH).parent)
+        if ffmpeg_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{ffmpeg_dir};{os.environ.get('PATH', '')}"
+        print(f"Loaded FFmpeg from: {FFMPEG_PATH}")
+except Exception as e:
+    print(f"Warning: ffmpeg detection error: {e}")
     FFMPEG_PATH = None
 
 app = FastAPI(title="PinVault Pro Video Service")
@@ -27,7 +48,7 @@ app = FastAPI(title="PinVault Pro Video Service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -99,11 +120,7 @@ def _scrape_pinterest_direct(url: str) -> Optional[dict]:
 
         html = resp.text.replace(r'\/', '/').replace(r'\u002F', '/')
 
-        # Verify pin existence: check if page returned PinNotFound
-        if 'PinNotFound' in html:
-            print("Pin marked as PinNotFound on Pinterest.")
-            raise HTTPException(status_code=404, detail="This Pin does not exist or has been deleted on Pinterest.")
-
+        # Verify pin existence inside relay payload specifically, not raw HTML substring
         video_url = None
         thumbnail = None
         title = ""
@@ -181,6 +198,13 @@ def _scrape_pinterest_direct(url: str) -> Optional[dict]:
                 except Exception:
                     video_url = hls_cand
 
+        # Fallback for og:video
+        if not video_url:
+            og_vid = re.search(r'property="og:video(?::secure_url)?"\s+content="([^"]+)"', html, re.I) or \
+                     re.search(r'content="([^"]+)"\s+property="og:video(?::secure_url)?"', html, re.I)
+            if og_vid:
+                video_url = og_vid.group(1)
+
         # Fallback for thumbnail / title
         if not thumbnail:
             og_img = re.search(r'property="og:image"\s+content="([^"]+)"', html)
@@ -193,6 +217,24 @@ def _scrape_pinterest_direct(url: str) -> Optional[dict]:
                 title = re.sub(r'\s*[-|]\s*Pinterest\s*$', '', title_m.group(1)).strip()
             if not title:
                 title = f"Pinterest Pin {pin_id or ''}".strip()
+
+        # Widget API fallback if still not found
+        if not video_url and not thumbnail and pin_id:
+            try:
+                w_resp = requests.get(
+                    f"https://widgets.pinterest.com/v3/pidgets/pins/info/?pin_ids={pin_id}",
+                    headers=BROWSER_HEADERS,
+                    timeout=10,
+                )
+                if w_resp.status_code == 200:
+                    w_json = w_resp.json()
+                    p_list = w_json.get('data', [])
+                    if p_list and 'error' not in p_list[0]:
+                        w_meta = _parse_widget_data(p_list[0], url)
+                        if w_meta:
+                            return w_meta
+            except Exception as e:
+                print(f"Widget fallback failed: {e}")
 
         media_url = video_url or thumbnail
         if not media_url:
@@ -471,9 +513,14 @@ def fetch_metadata(req: MetadataRequest):
 
 # ── Helper: sanitize filename ──────────────────────────
 def _sanitize_filename(name: str) -> str:
-    """Remove characters that are unsafe for filenames."""
+    """Remove characters that are unsafe for filenames and HTTP headers."""
+    name = name.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+    name = name.replace('–', '-').replace('—', '-')
     name = re.sub(r'[\\/:*?"<>|]', '_', name)
-    return name[:200].strip() or 'video'
+    # Ensure strictly ASCII characters so HTTP Content-Disposition headers never fail
+    name = re.sub(r'[^\x20-\x7E]', '_', name)
+    name = re.sub(r'\s+', ' ', name)
+    return name[:150].strip() or 'video'
 
 
 # ── Helper: cleanup old temp files (older than 1 hour) ─
@@ -567,18 +614,27 @@ def download_video(req: DownloadRequest):
                 filepath.unlink(missing_ok=True)
 
     # 2. General download with yt-dlp (YouTube, Instagram, TikTok, Twitter, Facebook, etc.)
-    # Build format string ensuring audio is ALWAYS merged with video
-    format_str = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
+    # Build format string ensuring audio is ALWAYS merged with video, preferring H.264/AAC for speed
+    format_str = (
+        'bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/'
+        'bestvideo+bestaudio/'
+        'best[ext=mp4]/'
+        'best'
+    )
     
-    # Parse requested quality (e.g. "1080p", "720p", "480p", "360p")
+    # Parse requested quality (e.g. "1080p", "720p", "480p", "360p", "mp3")
     quality_str = (req.quality or '').lower().strip()
-    if quality_str and quality_str not in ('best', ''):
+    is_audio_only = quality_str in ('mp3', 'audio', 'm4a')
+
+    if is_audio_only:
+        format_str = 'bestaudio/best'
+    elif quality_str and quality_str not in ('best', ''):
         height_match = re.search(r'(\d+)', quality_str)
         if height_match:
             h = int(height_match.group(1))
             if h >= 144:
                 format_str = (
-                    f'bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/'
+                    f'bestvideo[height<={h}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/'
                     f'bestvideo[height<={h}]+bestaudio/'
                     f'best[height<={h}][ext=mp4]/'
                     f'best[height<={h}]/best'
@@ -588,11 +644,11 @@ def download_video(req: DownloadRequest):
     ydl_opts: Dict[str, Any] = {
         'outtmpl': outtmpl,
         'format': format_str,
-        'merge_output_format': 'mp4',
+        'merge_output_format': 'mp4' if not is_audio_only else 'mp3',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'socket_timeout': 30,
+        'socket_timeout': 60,
     }
 
     if FFMPEG_PATH:
@@ -601,8 +657,15 @@ def download_video(req: DownloadRequest):
     if os.path.exists('cookies.txt'):
         ydl_opts['cookiefile'] = 'cookies.txt'
 
+    if is_audio_only and FFMPEG_PATH:
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+
     try:
-        print(f"[{task_id}] Starting yt-dlp download for {target_url} with format: {format_str}")
+        print(f"[{task_id}] Starting optimized yt-dlp download for {target_url} with format: {format_str}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(target_url, download=True)
             if not info_dict:
@@ -688,3 +751,10 @@ def download_video(req: DownloadRequest):
         for f in DOWNLOAD_DIR.glob(f'{task_id}.*'):
             f.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+@app.get("/api/download")
+def download_video_get(url: str, quality: str = "best"):
+    """GET endpoint to trigger direct browser download streaming."""
+    return download_video(DownloadRequest(url=url, quality=quality))
+
