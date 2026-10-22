@@ -43,3 +43,8 @@ downloads/
 uploads/
 .pytest_cache/
 .mypy_cache/
+cookies.txt
+**/cookies.txt
+*.mp4
+*.webm
+*.mkv

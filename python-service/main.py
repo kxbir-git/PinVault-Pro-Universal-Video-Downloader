@@ -68,6 +68,43 @@ BROWSER_HEADERS = {
 }
 
 
+def _clean_url(url: str) -> str:
+    """Clean tracking parameters from Instagram, YouTube, etc."""
+    url = url.strip()
+    if 'instagram.com' in url.lower():
+        match = re.search(r'(https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+)', url)
+        if match:
+            return match.group(1) + '/'
+    return url
+
+
+def _get_cookie_file() -> Optional[str]:
+    """Find cookies.txt in python-service or root directory."""
+    candidates = [
+        Path(__file__).parent / 'cookies.txt',
+        Path.cwd() / 'cookies.txt',
+        Path.cwd() / 'python-service' / 'cookies.txt',
+        Path(__file__).parent.parent / 'cookies.txt',
+    ]
+    for c in candidates:
+        if c.exists() and c.stat().st_size > 10:
+            return str(c.resolve())
+    return None
+
+
+def _clean_error_message(err_str: str) -> str:
+    """Remove ANSI escape codes and provide user-friendly explanations."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    clean = ansi_escape.sub('', err_str).strip()
+    if 'Instagram sent an empty media response' in clean:
+        return (
+            "Instagram requires a session cookie to download Reels. "
+            "Please export your instagram.com cookies into 'cookies.txt' and place it in the python-service folder, "
+            "or configure RAPIDAPI_KEY in .env."
+        )
+    return clean
+
+
 def _is_pinterest_url(url: str) -> bool:
     """Check if the URL is a Pinterest URL."""
     parsed = urlparse(url)
@@ -369,7 +406,7 @@ def health_check():
 @app.post("/api/metadata")
 def fetch_metadata(req: MetadataRequest):
     """Extract video metadata without downloading."""
-    target_url = req.url.strip()
+    target_url = _clean_url(req.url)
 
     # 1. Direct Pinterest handling
     if _is_pinterest_url(target_url):
@@ -389,8 +426,10 @@ def fetch_metadata(req: MetadataRequest):
     if FFMPEG_PATH:
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
 
-    if os.path.exists('cookies.txt'):
-        ydl_opts['cookiefile'] = 'cookies.txt'
+    cookie_file = _get_cookie_file()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+        print(f"[Metadata] Using cookies from: {cookie_file}")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -504,7 +543,7 @@ def fetch_metadata(req: MetadataRequest):
             except Exception as api_err:
                 raise HTTPException(status_code=400, detail=f"Failed to fetch video info: {str(api_err)}")
 
-        raise HTTPException(status_code=400, detail=f"Could not process URL: {str(e)}")
+        raise HTTPException(status_code=400, detail=_clean_error_message(str(e)))
     except HTTPException:
         raise
     except Exception as e:
@@ -545,7 +584,7 @@ def download_video(req: DownloadRequest):
     """
     _cleanup_old_downloads()
     task_id = str(uuid.uuid4())
-    target_url = req.url.strip()
+    target_url = _clean_url(req.url)
 
     # 1. Direct handling for Pinterest
     if _is_pinterest_url(target_url):
@@ -654,8 +693,10 @@ def download_video(req: DownloadRequest):
     if FFMPEG_PATH:
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
 
-    if os.path.exists('cookies.txt'):
-        ydl_opts['cookiefile'] = 'cookies.txt'
+    cookie_file = _get_cookie_file()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+        print(f"[{task_id}] Using cookies from: {cookie_file}")
 
     if is_audio_only and FFMPEG_PATH:
         ydl_opts['postprocessors'] = [{
@@ -744,7 +785,7 @@ def download_video(req: DownloadRequest):
             except Exception as api_err:
                 raise HTTPException(status_code=400, detail=f"Download failed: {str(api_err)}")
 
-        raise HTTPException(status_code=400, detail=f"Could not download: {str(e)}")
+        raise HTTPException(status_code=400, detail=_clean_error_message(str(e)))
     except HTTPException:
         raise
     except Exception as e:
